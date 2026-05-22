@@ -25,24 +25,27 @@ def smooth_random_q(
     resolution: int,
     rng: np.random.Generator,
     amplitude: float = 0.35,
-    lowpass: float = 0.12,
+    corr_modes: float = 2.0,
     equilibrium_magnitude: float = 0.0,
 ) -> np.ndarray:
     """Create a smooth random Q field with shape (2, resolution, resolution).
 
+    Uses a Gaussian filter exp(-k²/kc) with kc=(2π·corr_modes)² so the field
+    has a genuine correlation length of ~(box / corr_modes).
+
     When equilibrium_magnitude > 0, the field is a small perturbation around
-    the nematic equilibrium order |Q| = equilibrium_magnitude, constructed by
-    drawing a smooth random director angle and adding noise of std `amplitude`.
-    When equilibrium_magnitude == 0 (default), the original zero-mean behaviour
-    is preserved for backward compatibility.
+    the nematic equilibrium |Q| = equilibrium_magnitude, built from a smooth
+    random director angle plus noise of std `amplitude`.
+    When equilibrium_magnitude == 0 (default), a zero-mean smooth random field
+    of std `amplitude` is returned.
     """
     kx, ky = wave_numbers(resolution)
     k2 = kx**2 + ky**2
-    k2_max = max(float(np.max(k2)), 1.0)
-    filt = np.exp(-lowpass * k2 / k2_max)
+    kc = (2.0 * np.pi * corr_modes) ** 2
+    filt = np.exp(-k2 / kc)
 
     if equilibrium_magnitude > 0.0:
-        # Smooth random angle covering the full nematic orientation space
+        # Smooth random director angle covering full nematic orientation space
         theta_raw = rng.normal(size=(resolution, resolution))
         theta_hat = np.fft.fft2(theta_raw) * filt
         theta = np.fft.ifft2(theta_hat).real
@@ -50,7 +53,7 @@ def smooth_random_q(
         q_eq = equilibrium_magnitude * np.stack(
             [np.cos(2.0 * theta), np.sin(2.0 * theta)], axis=0
         )
-        # Small smooth noise perturbation
+        # Small smooth noise perturbation (same filter)
         noise_raw = rng.normal(size=(2, resolution, resolution))
         noise_hat = np.fft.fft2(noise_raw, axes=(-2, -1)) * filt
         noise = np.fft.ifft2(noise_hat, axes=(-2, -1)).real
@@ -86,6 +89,35 @@ def defect_pair_q(
     q = np.stack([q1, q2], axis=0)
     q += noise * smooth_random_q(resolution, rng, amplitude=1.0)
     return q.astype(np.float32)
+
+
+def canonical_director_q(
+    resolution: int,
+    equilibrium_magnitude: float,
+    theta0: float = 0.25,
+    amplitude: float = 0.60,
+    mode_x: int = 1,
+    mode_y: int = 1,
+    phase_x: float = 0.0,
+    phase_y: float = 0.0,
+) -> np.ndarray:
+    """Create a periodic, defect-free, low-mode director perturbation.
+
+    This is intended as the canonical elastic-relaxation benchmark:
+    the scalar order starts at equilibrium everywhere, while the director angle
+    varies smoothly enough that the target should not collapse toward isotropic.
+    """
+
+    x = np.linspace(0.0, 1.0, resolution, endpoint=False)
+    y = np.linspace(0.0, 1.0, resolution, endpoint=False)
+    xx, yy = np.meshgrid(x, y, indexing="ij")
+    theta = theta0 + amplitude * np.cos(2.0 * np.pi * mode_x * xx + phase_x) * np.cos(
+        2.0 * np.pi * mode_y * yy + phase_y
+    )
+    return equilibrium_magnitude * np.stack(
+        [np.cos(2.0 * theta), np.sin(2.0 * theta)],
+        axis=0,
+    ).astype(np.float32)
 
 
 def rhs(q: np.ndarray, params: LdGParams, length: float = 1.0) -> np.ndarray:

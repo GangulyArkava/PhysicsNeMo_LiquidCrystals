@@ -18,6 +18,13 @@ except ImportError:
 from lc_pino.data import generate_dataset
 
 
+def parse_mode(value: str) -> tuple[int, int]:
+    parts = value.split(",")
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("mode must be formatted as M,N")
+    return int(parts[0]), int(parts[1])
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate Landau-de Gennes Q-tensor data.")
     parser.add_argument("--samples", type=int, default=256)
@@ -29,6 +36,30 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Override dt*steps with a fixed total integration time (option a: long coarsening).",
+    )
+    parser.add_argument(
+        "--corr-modes",
+        type=float,
+        default=2.0,
+        help="Gaussian filter cutoff (in modes) for smooth_random_q. Lower = smoother ICs.",
+    )
+    parser.add_argument(
+        "--init-mode",
+        choices=["mixed", "smooth", "defect", "canonical"],
+        default="mixed",
+        help="Initial-condition family to generate.",
+    )
+    parser.add_argument("--canonical-mode", type=parse_mode, default=(3, 2))
+    parser.add_argument("--canonical-amplitude", type=float, default=0.8)
+    parser.add_argument(
+        "--fixed-canonical-params",
+        action="store_true",
+        help="Use A=-0.1, C=1, L=0.02, gamma=1 for the canonical benchmark.",
+    )
+    parser.add_argument(
+        "--fixed-target-time",
+        action="store_true",
+        help="Use exactly --steps for every sample instead of randomizing target time.",
     )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--out", type=Path, default=Path("data/lc64_train.npz"))
@@ -48,7 +79,19 @@ def main() -> None:
     try:
         while remaining > 0:
             batch = min(128, remaining)
-            data = generate_dataset(batch, args.resolution, args.steps, args.dt, seed)
+            data = generate_dataset(
+                batch,
+                args.resolution,
+                args.steps,
+                args.dt,
+                seed,
+                corr_modes=args.corr_modes,
+                init_mode=args.init_mode,
+                canonical_mode=args.canonical_mode,
+                canonical_amplitude=args.canonical_amplitude,
+                fixed_canonical_params=args.fixed_canonical_params,
+                fixed_target_time=args.fixed_target_time,
+            )
             chunks.append(data)
             remaining -= batch
             seed += 1
@@ -75,6 +118,12 @@ def main() -> None:
     print(f"  median mean|Q|:                {np.median(q_mag):.4f}")
     print(f"  median equilibrium sqrt(-A/C): {np.median(eq_mag):.4f}")
     print(f"  fraction mean|Q| < 0.10:       {(q_mag < 0.10).mean():.4f}")
+    q0 = merged["inputs"][:, :2]
+    motion = np.linalg.norm((targets - q0).reshape(len(targets), -1), axis=1) / np.linalg.norm(
+        q0.reshape(len(q0), -1),
+        axis=1,
+    ).clip(1.0e-8)
+    print(f"  median ||qT-q0||/||q0||:       {np.median(motion):.4f}")
 
 
 if __name__ == "__main__":

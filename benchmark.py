@@ -9,7 +9,7 @@ import torch
 
 from lc_pino.data import make_input, sample_params
 from lc_pino.models import build_model
-from lc_pino.solver import defect_pair_q, smooth_random_q, solve_ldg
+from lc_pino.solver import LdGParams, canonical_director_q, defect_pair_q, smooth_random_q, solve_ldg
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,6 +21,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dt", type=float, default=2.0e-4)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--init-mode", choices=["mixed", "canonical"], default="mixed")
+    parser.add_argument("--canonical-mode", type=str, default="3,2")
+    parser.add_argument("--canonical-amplitude", type=float, default=0.8)
+    parser.add_argument("--fixed-canonical-params", action="store_true")
     parser.add_argument(
         "--require-physicsnemo",
         action="store_true",
@@ -32,10 +36,23 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     rng = np.random.default_rng(args.seed)
+    canonical_mode = tuple(int(part) for part in args.canonical_mode.split(","))
     cases = []
     for i in range(args.samples):
-        params = sample_params(rng)
-        q0 = defect_pair_q(args.resolution, rng) if i % 3 == 0 else smooth_random_q(args.resolution, rng)
+        params = LdGParams() if args.fixed_canonical_params else sample_params(rng)
+        if args.init_mode == "canonical":
+            q0 = canonical_director_q(
+                args.resolution,
+                equilibrium_magnitude=float(np.sqrt(-params.A / params.C)),
+                theta0=float(rng.uniform(0.0, np.pi)),
+                amplitude=args.canonical_amplitude,
+                mode_x=canonical_mode[0],
+                mode_y=canonical_mode[1],
+                phase_x=float(rng.uniform(0.0, 2.0 * np.pi)),
+                phase_y=float(rng.uniform(0.0, 2.0 * np.pi)),
+            )
+        else:
+            q0 = defect_pair_q(args.resolution, rng) if i % 3 == 0 else smooth_random_q(args.resolution, rng)
         target_time = args.steps * args.dt
         cases.append((q0.astype(np.float32), params, target_time))
 

@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 
 from lc_pino.data import make_input, sample_params
 from lc_pino.models import build_model
-from lc_pino.solver import defect_pair_q, solve_ldg
+from lc_pino.solver import LdGParams, canonical_director_q, defect_pair_q, solve_ldg
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,6 +28,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--stride", type=int, default=4)
+    parser.add_argument("--init-mode", choices=["defect", "canonical"], default="defect")
+    parser.add_argument("--canonical-mode", type=str, default="3,2")
+    parser.add_argument("--canonical-amplitude", type=float, default=0.8)
+    parser.add_argument("--fixed-canonical-params", action="store_true")
     return parser.parse_args()
 
 
@@ -82,8 +86,19 @@ def draw_director(
 def main() -> None:
     args = parse_args()
     rng = np.random.default_rng(args.seed)
-    params = sample_params(rng)
-    q0 = defect_pair_q(args.resolution, rng, scalar_order=float(np.sqrt(-params.A / params.C)))
+    params = LdGParams() if args.fixed_canonical_params else sample_params(rng)
+    if args.init_mode == "canonical":
+        canonical_mode = tuple(int(part) for part in args.canonical_mode.split(","))
+        q0 = canonical_director_q(
+            args.resolution,
+            equilibrium_magnitude=float(np.sqrt(-params.A / params.C)),
+            theta0=0.25,
+            amplitude=args.canonical_amplitude,
+            mode_x=canonical_mode[0],
+            mode_y=canonical_mode[1],
+        )
+    else:
+        q0 = defect_pair_q(args.resolution, rng, scalar_order=float(np.sqrt(-params.A / params.C)))
     mid_steps = max(1, args.steps // 2)
     times = [0.0, mid_steps * args.dt, args.steps * args.dt]
 
