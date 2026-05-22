@@ -24,6 +24,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resolution", type=int, default=64)
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--dt", type=float, default=2.0e-4)
+    parser.add_argument(
+        "--total-time",
+        type=float,
+        default=None,
+        help="Override dt*steps with a fixed total integration time (option a: long coarsening).",
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--out", type=Path, default=Path("data/lc64_train.npz"))
     return parser.parse_args()
@@ -31,6 +37,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.total_time is not None:
+        args.steps = max(1, int(round(args.total_time / args.dt)))
+        print(f"--total-time {args.total_time}: using steps={args.steps} (dt={args.dt})")
     args.out.parent.mkdir(parents=True, exist_ok=True)
     chunks = []
     remaining = args.samples
@@ -56,6 +65,16 @@ def main() -> None:
     }
     np.savez_compressed(args.out, **merged)
     print(f"wrote {args.out} with {args.samples} samples at {args.resolution}x{args.resolution}")
+
+    # Diagnostic: verify nematic order in generated targets
+    targets = merged["targets"]  # (N, 2, H, W)
+    params_arr = merged["params"]  # (N, 5): [A, C, L, gamma, target_time]
+    q_mag = np.sqrt(targets[:, 0] ** 2 + targets[:, 1] ** 2).mean(axis=(-2, -1))
+    eq_mag = np.sqrt(-params_arr[:, 0] / params_arr[:, 1])
+    print(f"order diagnostic (targets):")
+    print(f"  median mean|Q|:                {np.median(q_mag):.4f}")
+    print(f"  median equilibrium sqrt(-A/C): {np.median(eq_mag):.4f}")
+    print(f"  fraction mean|Q| < 0.10:       {(q_mag < 0.10).mean():.4f}")
 
 
 if __name__ == "__main__":

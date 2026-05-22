@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import types
+import warnings
 
 import torch
 from torch import nn
@@ -13,8 +14,12 @@ def build_model(
     latent_channels: int = 32,
     modes: int = 12,
     layers: int = 4,
+    require_physicsnemo: bool = False,
 ) -> nn.Module:
-    """Build a PhysicsNeMo FNO when available, otherwise use a small fallback."""
+    """Build a PhysicsNeMo FNO when available, otherwise use a small fallback.
+
+    Pass require_physicsnemo=True to raise instead of falling back silently.
+    """
 
     try:
         # PhysicsNeMo 2.0.0 can import Warp 1.13 on CPU-only Windows with a
@@ -42,7 +47,17 @@ def build_model(
         model = ResidualQModel(core, residual_scale=1.0)
         model.backend_name = "PhysicsNeMo FNO"
         return model
-    except Exception:
+    except Exception as e:
+        msg = (
+            f"PhysicsNeMo FNO unavailable ({type(e).__name__}: {e}); "
+            "falling back to local TinyFNO."
+        )
+        if require_physicsnemo:
+            raise RuntimeError(
+                f"--require-physicsnemo set but PhysicsNeMo import failed "
+                f"({type(e).__name__}: {e})"
+            ) from e
+        warnings.warn(msg, stacklevel=2)
         core = TinyFNO2d(in_channels, out_channels, width=latent_channels, modes=modes, layers=layers)
         model = ResidualQModel(core, residual_scale=1.0)
         model.backend_name = "local TinyFNO fallback"

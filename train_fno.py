@@ -26,6 +26,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--latent-channels", type=int, default=32)
     parser.add_argument("--modes", type=int, default=12)
+    parser.add_argument(
+        "--require-physicsnemo",
+        action="store_true",
+        help="Raise an error instead of falling back to TinyFNO if PhysicsNeMo is unavailable.",
+    )
     return parser.parse_args()
 
 
@@ -51,7 +56,11 @@ def main() -> None:
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size)
 
-    model = build_model(latent_channels=args.latent_channels, modes=args.modes).to(args.device)
+    model = build_model(
+        latent_channels=args.latent_channels,
+        modes=args.modes,
+        require_physicsnemo=args.require_physicsnemo,
+    ).to(args.device)
     backend = getattr(model, "backend_name", model.__class__.__name__)
     print(f"model_backend={backend}")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1.0e-5)

@@ -42,11 +42,14 @@ def generate_dataset(
 
     for i in range(samples):
         params = sample_params(rng)
+        equilibrium_order = float(np.sqrt(-params.A / params.C))
         if rng.random() < 0.35:
-            equilibrium_order = float(np.sqrt(-params.A / params.C))
             q0 = defect_pair_q(resolution, rng, scalar_order=equilibrium_order)
         else:
-            q0 = smooth_random_q(resolution, rng).astype(np.float32)
+            # Perturb around nematic equilibrium so short integrations stay nematic
+            q0 = smooth_random_q(
+                resolution, rng, amplitude=0.05, equilibrium_magnitude=equilibrium_order
+            )
         local_steps = int(rng.integers(max(2, steps // 3), steps + 1))
         target_time = local_steps * dt
         qT = solve_ldg(q0, params=params, dt=dt, steps=local_steps)

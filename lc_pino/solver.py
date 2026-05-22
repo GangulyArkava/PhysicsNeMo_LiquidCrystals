@@ -26,18 +26,43 @@ def smooth_random_q(
     rng: np.random.Generator,
     amplitude: float = 0.35,
     lowpass: float = 0.12,
+    equilibrium_magnitude: float = 0.0,
 ) -> np.ndarray:
-    """Create a smooth random Q field with shape (2, resolution, resolution)."""
+    """Create a smooth random Q field with shape (2, resolution, resolution).
 
-    q = rng.normal(size=(2, resolution, resolution))
+    When equilibrium_magnitude > 0, the field is a small perturbation around
+    the nematic equilibrium order |Q| = equilibrium_magnitude, constructed by
+    drawing a smooth random director angle and adding noise of std `amplitude`.
+    When equilibrium_magnitude == 0 (default), the original zero-mean behaviour
+    is preserved for backward compatibility.
+    """
     kx, ky = wave_numbers(resolution)
     k2 = kx**2 + ky**2
     k2_max = max(float(np.max(k2)), 1.0)
     filt = np.exp(-lowpass * k2 / k2_max)
+
+    if equilibrium_magnitude > 0.0:
+        # Smooth random angle covering the full nematic orientation space
+        theta_raw = rng.normal(size=(resolution, resolution))
+        theta_hat = np.fft.fft2(theta_raw) * filt
+        theta = np.fft.ifft2(theta_hat).real
+        theta = np.pi * theta / (np.std(theta) + 1.0e-8)
+        q_eq = equilibrium_magnitude * np.stack(
+            [np.cos(2.0 * theta), np.sin(2.0 * theta)], axis=0
+        )
+        # Small smooth noise perturbation
+        noise_raw = rng.normal(size=(2, resolution, resolution))
+        noise_hat = np.fft.fft2(noise_raw, axes=(-2, -1)) * filt
+        noise = np.fft.ifft2(noise_hat, axes=(-2, -1)).real
+        noise_scale = np.std(noise, axis=(-2, -1), keepdims=True) + 1.0e-8
+        noise = amplitude * noise / noise_scale
+        return (q_eq + noise).astype(np.float32)
+
+    q = rng.normal(size=(2, resolution, resolution))
     qhat = np.fft.fft2(q, axes=(-2, -1)) * filt
     q = np.fft.ifft2(qhat, axes=(-2, -1)).real
     scale = np.std(q, axis=(-2, -1), keepdims=True) + 1.0e-8
-    return amplitude * q / scale
+    return (amplitude * q / scale).astype(np.float32)
 
 
 def defect_pair_q(

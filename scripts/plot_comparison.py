@@ -100,7 +100,7 @@ def main() -> None:
     ).to(args.device)
     model.load_state_dict(ckpt["model"])
     model.eval()
-    backend = ckpt.get("backend", getattr(model, "backend_name", "PhysicsNeMo FNO"))
+    backend = ckpt.get("backend", getattr(model, "backend_name", "unknown backend"))
 
     batch = np.stack([make_input(q0, params, t) for t in times], axis=0)
     xb = torch.from_numpy(batch).float().to(args.device)

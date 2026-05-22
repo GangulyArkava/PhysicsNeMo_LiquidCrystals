@@ -21,6 +21,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dt", type=float, default=2.0e-4)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--require-physicsnemo",
+        action="store_true",
+        help="Raise an error instead of falling back to TinyFNO if PhysicsNeMo is unavailable.",
+    )
     return parser.parse_args()
 
 
@@ -45,7 +50,10 @@ def main() -> None:
     model = build_model(
         latent_channels=int(ckpt.get("latent_channels", 32)),
         modes=int(ckpt.get("modes", 12)),
+        require_physicsnemo=args.require_physicsnemo,
     ).to(args.device)
+    backend = ckpt.get("backend", getattr(model, "backend_name", "unknown backend"))
+    print(f"model_backend: {backend}")
     model.load_state_dict(ckpt["model"])
     model.eval()
 
