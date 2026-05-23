@@ -12,7 +12,7 @@ try:
 except ImportError:
     tqdm = None
 
-from lc_pino.models import build_model, endpoint_physics_residual
+from lc_pino.models import build_model, pino_time_residual
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,6 +23,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1.0e-3)
     parser.add_argument("--physics-weight", type=float, default=0.02)
+    parser.add_argument(
+        "--physics-dt",
+        type=float,
+        default=1.0e-3,
+        help="Local time interval used by the PINO residual.",
+    )
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--latent-channels", type=int, default=32)
     parser.add_argument("--modes", type=int, default=12)
@@ -77,8 +83,11 @@ def main() -> None:
             yb = yb.to(args.device)
             pred = model(xb)
             data_loss = mse(pred, yb)
-            phys = endpoint_physics_residual(xb, pred)
-            phys_loss = torch.mean(phys**2)
+            if args.physics_weight > 0.0:
+                phys = pino_time_residual(model, xb, time_delta=args.physics_dt)
+                phys_loss = torch.mean(phys**2)
+            else:
+                phys_loss = torch.zeros((), device=args.device)
             loss = data_loss + args.physics_weight * phys_loss
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -116,6 +125,8 @@ def main() -> None:
                     "resolution": x.shape[-1],
                     "best_val_mse": best_val,
                     "backend": backend,
+                    "physics_weight": args.physics_weight,
+                    "physics_dt": args.physics_dt,
                 },
                 args.checkpoint,
             )

@@ -1,222 +1,101 @@
-# TASKS.md — PhysicsNeMo Liquid-Crystal Demo
+# Task: Generate the reviewer-response field-comparison figure
 
-Work list for fixing correctness and benchmark issues in this repo. Tasks are
-ordered by priority. **Start with Task 0 — it is blocking and the previous P0
-attempt did not actually fix it.** Then continue in order, and **stop for human
-review before starting Task 5** (it contains a modeling decision that needs a
-human call).
+## Goal
+Produce a single publication-quality figure for a grant rebuttal that shows the
+PhysicsNeMo FNO reproducing 2D Landau–de Gennes director relaxation against the
+spectral reference solver, with a caption whose numbers match the response text.
 
-Verify the data-regime fix at the REAL resolution/steps (64×64, 200 steps), not
-just the 32×32 smoke config — the two diverged last time and the smoke config
-masked the bug. After other P0 changes, also run the smoke commands in the
-[Regression check](#regression-check) section as a sanity test.
+The existing `scripts/plot_comparison.py` already does ~90% of this. Your job is a
+**targeted modification + a new wrapper**, not a rewrite. Read `plot_comparison.py`
+first and reuse its `director()` / `draw_director()` / `make_input()` machinery.
 
----
+## Deliverables
+1. `scripts/plot_response_figure.py` — a new script (copy-and-adapt from
+   `plot_comparison.py`) that produces the figure described below.
+2. `figures/response_field_comparison.png` — the rendered figure (300 dpi).
+3. Printed-to-stdout summary block with the exact numbers for the caption.
 
-## P0 — Fix the data regime  [STILL BROKEN — DO THIS FIRST]
+Do **not** modify `plot_comparison.py`, `solver.py`, `data.py`, or `models.py`.
+All new logic lives in the new script.
 
-The previous commit (`8ea6770`) fixed the **initial conditions** but NOT the
-**targets**. Verified against the actual `generate_dataset` at 64×64 / 200 steps:
+## Inputs / assumptions
+- Trained checkpoint exists (a dict with keys: `model`, `latent_channels`,
+  `modes`, `backend`). Path passed via `--checkpoint`. The user runs this locally
+  where **PhysicsNeMo is installed**, so `build_model` must load the real FNO,
+  not the TinyFNO fallback. Add `--require-physicsnemo` (default True) and pass it
+  through to `build_model(require_physicsnemo=...)` so the run FAILS LOUDLY if the
+  real backend is unavailable — a figure built on the untrained fallback would be
+  meaningless and must never be produced silently.
+- Canonical benchmark settings, matching how the model was trained:
+  `--init-mode canonical`, `--canonical-mode 3,2`, `--canonical-amplitude 0.8`,
+  `--resolution 64`, `--steps 500`, `--dt 2e-4` (target time t = 0.1),
+  `--fixed-canonical-params` (A=-0.1, C=1.0, L=0.02, gamma=1.0).
+  Expose all as CLI args with these defaults.
 
+## Figure spec (the main panel — same layout as plot_comparison, refined)
+- 2 rows × 3 columns. Top row = spectral reference; bottom row = FNO.
+- Columns = target times [0.0, t/2, t] labelled "initial", "intermediate", "final".
+- Reuse `draw_director()` exactly (director quiver over |Q| heatmap, shared vmin/vmax,
+  viridis, shared colorbar labelled scalar order |Q|).
+- CRITICAL: preserve the existing convention at line ~133 — the bottom-row "initial"
+  panel shows the shared `q0` (the IC the operator consumes), NOT `pred[0]`. The FNO
+  panels show `pred[1]` (intermediate) and `pred[2]` (final). Do not "fix" this.
+- Title/caption must be clean for a document (no dev-style timing dump). Put the
+  headline metrics in a one-line caption: mean relative L2, CPU speedup, GPU speedup,
+  dataset size. Use placeholders pulled from the multi-sample eval below, not the
+  single-IC number.
+
+## The one substantive addition: multi-sample error, not single-IC
+`plot_comparison.py` reports `final_rel` for ONE initial condition. For the rebuttal
+the headline error must be a **mean over a held-out set**, or a reviewer can dismiss
+it as a lucky sample. Add this:
+
+- New arg `--eval-samples` (default 64). Before plotting, loop over `--eval-samples`
+  held-out ICs drawn with `sample_params` / the canonical generator using a FIXED
+  seed (`--seed`, default 7) advanced per sample so the set is reproducible.
+- For each: spectral solve to t (ground truth) and a single FNO forward pass via
+  `make_input(q0, params, t)`. Compute per-sample relative L2 at the final time:
+  `||pred_T - spectral_T|| / max(||spectral_T||, 1e-8)`.
+- Report **mean** and **median** relative L2 over the set. The figure caption uses
+  the mean. Print both to stdout.
+- Then pick ONE representative sample for the visual panel: the sample whose error is
+  closest to the median (NOT the best — closest-to-median is the honest choice).
+  Print which sample index was chosen and its error.
+
+## Timing / speedup
+- Measure spectral wall time and FNO wall time as plot_comparison already does
+  (with `torch.cuda.synchronize()` guards on CUDA). Report single-trajectory speedup.
+- Speedups depend on device. Run the script TWICE locally: once `--device cpu`,
+  once `--device cuda`, and record both numbers for the caption. Do NOT hardcode
+  35x / 53x — emit whatever this checkpoint actually produces and let the user
+  reconcile with the text. (The response currently cites ~35x CPU / ~53x GPU batched;
+  if your measured numbers differ, print a clear warning so the user updates the text.)
+
+## Stdout summary block (must print exactly these, labelled)
+- `eval_samples`, `mean_relative_l2`, `median_relative_l2`
+- `chosen_sample_index`, `chosen_sample_relative_l2`
+- `device`, `single_trajectory_speedup_x`
+- `spectral_time_s`, `fno_time_s`
+- `backend` (must contain "PhysicsNeMo", else abort)
+
+## Acceptance checks
+- Script aborts with a clear error if `backend` does not contain "PhysicsNeMo"
+  (guards against the TinyFNO fallback silently producing a fake figure).
+- `figures/response_field_comparison.png` exists, 300 dpi, 2x3, shared colorbar.
+- Mean relative L2 over >=64 samples printed and is ~7e-3 order of magnitude for a
+  correctly trained canonical model (sanity bound: abort/warn if mean > 0.1).
+- Caption numbers in the PNG match the stdout summary exactly.
+
+## Run commands (document these at top of the script's docstring)
 ```
-IC     median mean|Q| = 0.416   (correct, at equilibrium)
-TARGET median mean|Q| = 0.055   (collapsed)
-fraction of targets < 0.10 = 71%   (was 64% before the change — slightly worse)
-```
-
-The IC-magnitude acceptance check passed, but the field still relaxes to
-near-isotropic within ~20 steps, so accuracy numbers remain meaningless and the
-"elastic smoothing preserves nematic order" claim is still unsupported.
-
-**Root cause (confirmed numerically), both in `smooth_random_q` in
-`lc_pino/solver.py`:**
-
-1. **The lowpass filter barely smooths.** `filt = exp(-lowpass * k2/k2_max)` with
-   `lowpass=0.12` retains ~89% amplitude even at the highest wavenumber — it is
-   nearly a pass-through, so the "smooth" field is full of high-k content. (This
-   bug predates the change; it was harmless for zero-mean fields but is fatal once
-   the field is built from a director angle.)
-2. **Pointwise magnitude does not survive gradient flow; director *alignment*
-   does.** Building `Q = q_eq·[cos 2θ, sin 2θ]` from a θ field with high-k content
-   makes `q1, q2` oscillate rapidly in space (~99% of spectral power at |k|>20).
-   The elastic term `L∇²Q` smooths those oscillations toward their spatial mean
-   (≈0 for cos/sin), destroying |Q| while the pointwise t=0 magnitude check still
-   looks fine.
-
-- [ ] **Task 0 — Give the smoothing filter a real correlation length. [BLOCKING]**
-  - File: `lc_pino/solver.py` (`smooth_random_q`)
-  - Replace the near-pass-through filter with one that has a genuine length scale,
-    e.g. a Gaussian cut at a few modes: `filt = exp(-k2 / kc)` where
-    `kc = (2π·corr_modes)²` and `corr_modes ≈ 2` (correlation length ~ box/2).
-  - Apply the same proper filter to BOTH the director-angle field and the noise.
-  - Keep the `equilibrium_magnitude` argument and the backward-compat (zero-mean)
-    path — this is about the filter, not the API.
-  - Expose `corr_modes` (or an equivalent length scale) as an argument, threaded
-    through `lc_pino/data.py` so it is tunable from data generation.
-  - **Reference (verified-good):** with `corr_modes ≈ 2`, default params
-    (A=-0.1, C=1, L=0.02, γ=1), 200 steps, dt=2e-4: target |Q| 0.313 → 0.202,
-    motion ≈ 0.445. Larger `corr_modes` (rougher field) collapses more; tune so
-    the Task 0-verify criteria below all pass.
-
-- [ ] **Task 0-verify — acceptance is on TARGETS, with a non-triviality guard.**
-  - The diagnostic already in `scripts/generate_data.py` measures targets — keep
-    it, and extend it to also report median `||qT - q0|| / ||q0||` so we do not
-    overcorrect into a trivial "predict the input back" task.
-  - Run `check_regime.py` (in repo root) as the gate before regenerating the full
-    dataset. **All three must hold at 64×64 / 200 steps:**
-    - median target `mean|Q|` within ~30% of `sqrt(-A/C)`,
-    - fraction of targets with `mean|Q| < 0.10` below ~0.15,
-    - median `||qT - q0|| / ||q0||` in [0.2, 0.7].
-
-- [x] **Task 1 — IC initialization (DONE, but did not fix the regime).**
-  - Files: `lc_pino/solver.py`, `lc_pino/data.py`
-  - `smooth_random_q` now accepts `equilibrium_magnitude` and builds
-    `Q = q_eq·[cos 2θ, sin 2θ] + noise`; `generate_dataset` passes
-    `sqrt(-A/C)`. `--total-time` CLI override added to `generate_data.py`.
-  - This correctly fixed the ICs but the targets still collapse — see Task 0. The
-    original acceptance criterion was wrong because it was satisfiable by the IC
-    construction alone without the dynamics being meaningful.
-
-- [ ] **Task 2 — Regenerate data, re-benchmark, update README.**
-  - Files: `README.md`, plus regenerated artifacts in `data/` and `figures/`
-  - **Only after Task 0 passes `check_regime.py`**, regenerate the dataset,
-    re-run `benchmark.py` and `scripts/plot_comparison.py`, and update all quoted
-    numbers and figures in the README to reflect the corrected regime.
-  - **Acceptance:** README numbers match a fresh run; no stale pre-fix figures
-    remain in `figures/`.
-
----
-
-## P0 — Confirm the backend is real
-
-There is a real risk that CPU-only runs have been silently using the local
-`TinyFNO` fallback while labels still say "PhysicsNeMo FNO".
-
-- [x] **Task 3 — Make the PhysicsNeMo fallback loud and verifiable. (DONE)**
-  - Files: `lc_pino/models.py`, `train_fno.py`, `benchmark.py`,
-    `scripts/plot_comparison.py`
-  - Verified in commit `8ea6770`: `except Exception as e` emits a `warnings.warn`
-    naming the actual exception; `require_physicsnemo=True` raises with the cause
-    chained; `--require-physicsnemo` added to both scripts; `benchmark.py` prints
-    `model_backend` from the checkpoint; the hardcoded `"PhysicsNeMo FNO"` plot
-    default was removed in favor of the checkpoint's stored backend.
-
----
-
-## P1 — Physics residual correctness
-
-- [ ] **Task 4 — Use a spectral Laplacian in the physics residual.**
-  - File: `lc_pino/models.py` (`endpoint_physics_residual`,
-    `periodic_laplacian_torch`)
-  - The residual currently uses a 5-point finite-difference stencil while the
-    solver (`lc_pino/solver.py`) uses an exact spectral Laplacian. The physics
-    loss therefore penalizes a *different* PDE than the data was generated from.
-  - Replace the FD Laplacian with an FFT-based one matching `solver.py`.
-  - **Acceptance:** on a known single-mode field, the Torch residual Laplacian
-    matches the NumPy solver's Laplacian to floating-point tolerance (add a test
-    under `tests/`).
-
-- [ ] **Task 5 — Fix the long-interval time discretization. [STOP — needs human review first]**
-  - File: `lc_pino/models.py` (`endpoint_physics_residual`)
-  - The current `(pred - q0) / target_time - rhs(pred)` treats a secant over the
-    full (large) target time as `dQ/dt`. This is a poor approximation when the
-    field changes ~98% over the interval.
-  - **Do not implement until reviewed.** Two candidate designs:
-    1. Short-Δt consistency loss: predict a small step and enforce the RHS.
-    2. Autoregressive one-step rollout (already listed under README "Next
-       Extensions").
-  - Bring a short written recommendation (tradeoffs of each) to the human before
-    coding.
-
----
-
-## P1 — Input normalization
-
-- [ ] **Task 6 — Normalize parameter and time input channels.**
-  - Files: `lc_pino/data.py` (`make_input`), `train_fno.py`, `benchmark.py`,
-    `scripts/plot_comparison.py`
-  - Channels A, C, L, gamma, target_time span very different scales (e.g. A ~
-    -0.3..-0.05, C ~ 1, L ~ 0.02, target_time ~ 0.004..0.1) and feed the FNO
-    unnormalized.
-  - Normalize these channels to O(1). **Store the normalization constants in the
-    checkpoint** and apply them identically at train and inference time.
-  - **Acceptance:** normalization constants are saved in the checkpoint and
-    applied identically in `train_fno.py`, `benchmark.py`, and
-    `scripts/plot_comparison.py`; inference with a saved checkpoint reproduces
-    training-time behavior.
-
----
-
-## P2 — Fairer benchmark and diagnostics
-
-- [ ] **Task 7 — Batch the spectral solver in `benchmark.py`.**
-  - File: `benchmark.py`
-  - It currently solves trajectories one at a time in a list comprehension and
-    compares to a single batched FNO pass. The NumPy FFT solver vectorizes over a
-    leading batch axis nearly for free.
-  - Make `solve_ldg` (or a batched variant) operate on a leading batch dimension
-    and time the batched solve, so the comparison is apples-to-apples.
-  - **Acceptance:** benchmark reports batched solver time; results are unchanged
-    numerically vs the per-sample loop (same final fields within tolerance).
-
-- [ ] **Task 8 — Add a per-trajectory rel-L2 distribution plot, split by init type.**
-  - Files: `benchmark.py` or a new `scripts/plot_error_distribution.py`
-  - Plot the distribution (histogram or violin) of per-trajectory relative L2,
-    split by random-field vs defect-field initial conditions. This explains the
-    mean-vs-median gap.
-  - **Acceptance:** a figure is produced showing two clearly labeled
-    distributions; the script prints mean and median per group.
-
-- [ ] **Task 9 — Add a wall-clock-vs-grid-size crossover plot.**
-  - File: new `scripts/plot_scaling.py`
-  - Plot spectral solver time vs FNO inference time as a function of grid
-    resolution (log-log), to identify the crossover where the surrogate pays off.
-  - **Acceptance:** a log-log figure across at least 4 resolutions (e.g. 32, 64,
-    128, 256) with both curves and the crossover visible.
-
----
-
-## P2 — Test the spectral conv (fallback only)
-
-- [ ] **Task 10 — Unit-test `SpectralConv2d` mode indexing.**
-  - Files: `lc_pino/models.py`, new `tests/test_spectral_conv.py`
-  - The negative-frequency block (`out_ft[:, :, -m1:, :m2]` written from
-    `weights2[:, :, :m1, :m2]`, ~lines 97–98) is unconventional and may mix
-    modes. Only affects the TinyFNO fallback, but CPU runs may have used it.
-  - Add a test feeding a known single-mode field and checking the transform
-    behaves as expected. Fix the indexing if the test reveals a bug.
-  - **Acceptance:** test passes (or indexing is corrected and then passes).
-
----
-
-## Regression check
-
-Run after each P0 change (from README "Quick Smoke Run"):
-
-```bash
-python scripts/generate_data.py --samples 16 --resolution 32 --steps 20 --out data/lc32_smoke.npz
-python train_fno.py --data data/lc32_smoke.npz --epochs 2 --batch-size 4 --checkpoint checkpoints/smoke.pt
-python benchmark.py --checkpoint checkpoints/smoke.pt --resolution 32 --samples 8 --steps 20
-python scripts/plot_comparison.py --checkpoint checkpoints/smoke.pt --resolution 32 --steps 20 --out figures/smoke_directors.png
+# from repo root, PhysicsNeMo env active
+python scripts/plot_response_figure.py --checkpoint path/to/ckpt.pt \
+    --fixed-canonical-params --device cpu  --eval-samples 64
+python scripts/plot_response_figure.py --checkpoint path/to/ckpt.pt \
+    --fixed-canonical-params --device cuda --eval-samples 64
 ```
 
-(Adjust `--steps`/`--dt` to match the new default time horizon from Task 1.)
-
-## Notes for the agent
-
-- **Task 0 is blocking** — fix it and confirm `check_regime.py` prints ALL PASS
-  at 64×64 / 200 steps before doing anything else. Task 3 is already done.
-- **Verify the data regime at real settings, not the smoke config.** The smoke
-  run (32×32 / 20 steps) passed last time while the real run (64×64 / 200 steps)
-  failed, because the collapse needs enough steps to set in. Use the smoke
-  commands only as a quick "does it run" check, never as the regime acceptance
-  gate.
-- The acceptance metric must be measured on **targets** (post-`solve_ldg`), never
-  on initial conditions, and must include the motion guard so a near-identity
-  task can't pass.
-- Pause for human review before Task 5 — it is a modeling decision; present
-  options, do not pick unilaterally.
-- Keep the two-component traceless Q representation consistent across solver,
-  data, models, and plotting.
-- After Tasks 0 and 6, old checkpoints are invalid (input distribution changed);
-  retrain rather than loading stale checkpoints.
+## Out of scope (do not build)
+- No error-vs-time curve (separate task).
+- No long-time / extrapolation panel.
+- No autoregressive rollout — the operator is queried at target time directly.

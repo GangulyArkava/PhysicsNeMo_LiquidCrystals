@@ -143,7 +143,23 @@ class TinyFNO2d(nn.Module):
         return self.project(x)
 
 
+def spectral_laplacian_torch(q: torch.Tensor, length: float = 1.0) -> torch.Tensor:
+    """Periodic spectral Laplacian matching the NumPy reference solver."""
+
+    nx, ny = q.shape[-2:]
+    device = q.device
+    dtype = q.dtype
+    kx = 2.0 * torch.pi * torch.fft.fftfreq(nx, d=length / nx, device=device)
+    ky = 2.0 * torch.pi * torch.fft.fftfreq(ny, d=length / ny, device=device)
+    k2 = kx[:, None] ** 2 + ky[None, :] ** 2
+    qhat = torch.fft.fft2(q, dim=(-2, -1))
+    lap = torch.fft.ifft2(-k2.to(dtype=dtype)[None, None, ...] * qhat, dim=(-2, -1)).real
+    return lap
+
+
 def periodic_laplacian_torch(q: torch.Tensor, dx: float) -> torch.Tensor:
+    """Deprecated finite-difference Laplacian kept for compatibility."""
+
     return (
         torch.roll(q, 1, dims=-2)
         + torch.roll(q, -1, dims=-2)
@@ -153,6 +169,15 @@ def periodic_laplacian_torch(q: torch.Tensor, dx: float) -> torch.Tensor:
     ) / (dx * dx)
 
 
+def ldg_rhs_torch(q: torch.Tensor, inputs: torch.Tensor) -> torch.Tensor:
+    A = inputs[:, 2:3]
+    C = inputs[:, 3:4]
+    L = inputs[:, 4:5]
+    gamma = inputs[:, 5:6]
+    r2 = q[:, 0:1] ** 2 + q[:, 1:2] ** 2
+    return gamma * (L * spectral_laplacian_torch(q) - A * q - C * r2 * q)
+
+
 def endpoint_physics_residual(inputs: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
     q0 = inputs[:, :2]
     A = inputs[:, 2:3]
@@ -160,7 +185,33 @@ def endpoint_physics_residual(inputs: torch.Tensor, pred: torch.Tensor) -> torch
     L = inputs[:, 4:5]
     gamma = inputs[:, 5:6]
     target_time = torch.clamp(inputs[:, 6:7], min=1.0e-6)
-    dx = 1.0 / pred.shape[-1]
     r2 = pred[:, 0:1] ** 2 + pred[:, 1:2] ** 2
-    rhs = gamma * (L * periodic_laplacian_torch(pred, dx) - A * pred - C * r2 * pred)
+    rhs = gamma * (L * spectral_laplacian_torch(pred) - A * pred - C * r2 * pred)
     return (pred - q0) / target_time - rhs
+
+
+def pino_time_residual(
+    model: nn.Module,
+    inputs: torch.Tensor,
+    time_delta: float = 1.0e-3,
+) -> torch.Tensor:
+    """Local-in-time PDE residual for an endpoint operator Q0,t -> Q(t).
+
+    The old endpoint residual used (Q(t)-Q(0))/t as dQ/dt, which is a poor
+    approximation for the t=0.1 benchmark. This residual instead evaluates the
+    model at nearby target times and forms a local backward finite difference.
+    """
+
+    target_time = inputs[:, 6:7]
+    dt = torch.minimum(
+        torch.full_like(target_time, float(time_delta)),
+        torch.clamp(target_time, min=1.0e-6),
+    )
+    current_inputs = inputs
+    previous_inputs = inputs.clone()
+    previous_inputs[:, 6:7] = target_time - dt
+    q_now = model(current_inputs)
+    q_prev = model(previous_inputs)
+    time_derivative = (q_now - q_prev) / dt
+    rhs = ldg_rhs_torch(q_now, current_inputs)
+    return time_derivative - rhs
